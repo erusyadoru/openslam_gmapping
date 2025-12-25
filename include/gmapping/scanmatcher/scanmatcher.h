@@ -23,6 +23,7 @@ class SCANMATCHER_EXPORT ScanMatcher{
 		double optimize(OrientedPoint& mean, CovarianceMatrix& cov, const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const;
 		
 		double   registerScan(ScanMatcherMap& map, const OrientedPoint& p, const double* readings);
+		double   registerScan(ScanMatcherMap& map, const OrientedPoint& p, const double* readings, const float* intensities);
 		void setLaserParameters
 			(unsigned int beams, double* angles, const OrientedPoint& lpose);
 		void setMatchingParameters

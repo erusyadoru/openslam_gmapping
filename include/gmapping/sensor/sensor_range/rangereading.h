@@ -24,8 +24,14 @@ class SENSOR_RANGE_EXPORT RangeReading: public SensorReading, public std::vector
 		unsigned int rawView(double* v, double density=0.) const;
 		std::vector<Point> cartesianForm(double maxRange=1e6) const;
 		unsigned int activeBeams(double density=0.) const;
+
+		// Intensity support
+		inline void setIntensities(const std::vector<float>& intensities) { m_intensities = intensities; }
+		inline const std::vector<float>& getIntensities() const { return m_intensities; }
+		inline bool hasIntensities() const { return !m_intensities.empty(); }
 	protected:
 		OrientedPoint m_pose;
+		std::vector<float> m_intensities;  // LiDAR intensity values per beam
 };
 
 };
