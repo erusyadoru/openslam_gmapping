@@ -4,6 +4,10 @@
 #define isnan(x) (x==FP_NAN)
 #endif
 
+#ifdef USE_OPENMP
+#include <omp.h>
+#endif
+
 /**Just scan match every single particle.
 If the scan matching fails, the particle gets a default likelihood.*/
 inline void GridSlamProcessor::scanMatch(const double* plainReading){
@@ -17,33 +21,32 @@ inline void GridSlamProcessor::scanMatch(const double* plainReading){
 
   double sumScore=0;
   int failCount=0;
-  for (ParticleVector::iterator it=m_particles.begin(); it!=m_particles.end(); it++){
+  const int numParticles = static_cast<int>(m_particles.size());
+
+#ifdef USE_OPENMP
+  #pragma omp parallel for reduction(+:sumScore,failCount) schedule(dynamic)
+#endif
+  for (int i = 0; i < numParticles; i++){
+    Particle& particle = m_particles[i];
     OrientedPoint corrected;
     double score, l, s;
-    score=m_matcher.optimize(corrected, it->map, it->pose, plainReading);
-    //    it->pose=corrected;
-    if (score>m_minimumScore){
-      it->pose=corrected;
+    score = m_matcher.optimize(corrected, particle.map, particle.pose, plainReading);
+
+    if (score > m_minimumScore){
+      particle.pose = corrected;
     } else {
       failCount++;
-	if (m_infoStream && failCount <= 3){
-	  m_infoStream << "Scan Matching Failed, using odometry. Likelihood=" << l <<std::endl;
-	  m_infoStream << "lp:" << m_lastPartPose.x << " "  << m_lastPartPose.y << " "<< m_lastPartPose.theta <<std::endl;
-	  m_infoStream << "op:" << m_odoPose.x << " " << m_odoPose.y << " "<< m_odoPose.theta <<std::endl;
-	}
     }
 
-    m_matcher.likelihoodAndScore(s, l, it->map, it->pose, plainReading);
-    sumScore+=score;
-    it->weight+=l;
-    it->weightSum+=l;
-
-    //set up the selective copy of the active area
-    //by detaching the areas that will be updated
-    // NOTE: computeActiveArea removed - it's called inside registerScan when needed
-    //       The call here was wasted since resample calls invalidateActiveArea before registerScan
-    m_matcher.invalidateActiveArea();
+    m_matcher.likelihoodAndScore(s, l, particle.map, particle.pose, plainReading);
+    sumScore += score;
+    particle.weight += l;
+    particle.weightSum += l;
   }
+
+  // Invalidate active area once after parallel section
+  m_matcher.invalidateActiveArea();
+
   if (m_infoStream){
     m_infoStream << "[ScanMatch] AvgScore=" << sumScore/m_particles.size()
                  << " failCount=" << failCount << "/" << m_particles.size() << std::endl;
@@ -180,22 +183,27 @@ inline bool GridSlamProcessor::resample(const double* plainReading, int adaptSiz
       std::cerr << "Done" << std::endl;
       std::cerr << "Copying Particles and  Registering  scans...";
 
-      // Optimized: compute activeArea once, share across all particles
-      ParticleVector::iterator first_it = temp.begin();
-      first_it->setWeight(0);
+      // Step 1: Copy all particles to m_particles (sequential)
+      const int numTemp = static_cast<int>(temp.size());
+      for (int i = 0; i < numTemp; i++){
+        temp[i].setWeight(0);
+        m_particles.push_back(temp[i]);
+      }
+
+      // Step 2: First particle computes activeArea
       m_matcher.invalidateActiveArea();
-      m_matcher.registerScan(first_it->map, first_it->pose, plainReading);
-      m_particles.push_back(*first_it);
+      m_matcher.registerScan(m_particles[0].map, m_particles[0].pose, plainReading);
 
       // Get the computed activeArea from first particle's map
       const HierarchicalArray2D<PointAccumulator>::PointSet& sharedActiveArea =
-          ScanMatcher::getActiveArea(first_it->map);
+          ScanMatcher::getActiveArea(m_particles[0].map);
 
-      // Remaining particles: use shared activeArea
-      for (ParticleVector::iterator it = first_it + 1; it != temp.end(); it++){
-        it->setWeight(0);
-        m_matcher.registerScanWithActiveArea(it->map, it->pose, plainReading, sharedActiveArea);
-        m_particles.push_back(*it);
+      // Step 3: Remaining particles use shared activeArea (parallel)
+#ifdef USE_OPENMP
+      #pragma omp parallel for schedule(dynamic)
+#endif
+      for (int i = 1; i < numTemp; i++){
+        m_matcher.registerScanWithActiveArea(m_particles[i].map, m_particles[i].pose, plainReading, sharedActiveArea);
       }
       std::cerr  << " Done" <<std::endl;
       hasResampled = true;
@@ -223,30 +231,30 @@ inline bool GridSlamProcessor::resample(const double* plainReading, int adaptSiz
 
     } else {
       // Optimized: compute activeArea once, share across all particles
-      // First particle: compute activeArea
-      ParticleVector::iterator first_it = m_particles.begin();
-      TNode* first_node = new TNode(first_it->pose, 0.0, *node_it, 0);
-      first_node->reading = reading;
-      first_it->node = first_node;
+      const int numParticles = static_cast<int>(m_particles.size());
+
+      // Step 1: Create TNodes for all particles (sequential - fast)
+      for (int i = 0; i < numParticles; i++){
+        TNode* node = new TNode(m_particles[i].pose, 0.0, oldGeneration[i], 0);
+        node->reading = reading;
+        m_particles[i].node = node;
+        m_particles[i].previousIndex = i;
+      }
+
+      // Step 2: First particle computes activeArea
       m_matcher.invalidateActiveArea();
-      m_matcher.registerScan(first_it->map, first_it->pose, plainReading);
-      first_it->previousIndex = index;
-      index++;
-      node_it++;
+      m_matcher.registerScan(m_particles[0].map, m_particles[0].pose, plainReading);
 
       // Get the computed activeArea from first particle's map
       const HierarchicalArray2D<PointAccumulator>::PointSet& sharedActiveArea =
-          ScanMatcher::getActiveArea(first_it->map);
+          ScanMatcher::getActiveArea(m_particles[0].map);
 
-      // Remaining particles: use shared activeArea
-      for (ParticleVector::iterator it = first_it + 1; it != m_particles.end(); it++){
-        TNode* node = new TNode(it->pose, 0.0, *node_it, 0);
-        node->reading = reading;
-        it->node = node;
-        m_matcher.registerScanWithActiveArea(it->map, it->pose, plainReading, sharedActiveArea);
-        it->previousIndex = index;
-        index++;
-        node_it++;
+      // Step 3: Remaining particles use shared activeArea (parallel)
+#ifdef USE_OPENMP
+      #pragma omp parallel for schedule(dynamic)
+#endif
+      for (int i = 1; i < numParticles; i++){
+        m_matcher.registerScanWithActiveArea(m_particles[i].map, m_particles[i].pose, plainReading, sharedActiveArea);
       }
       std::cerr  << "Done" <<std::endl;
     }
