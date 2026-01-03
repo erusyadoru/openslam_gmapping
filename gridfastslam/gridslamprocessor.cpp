@@ -5,11 +5,21 @@
 #include <set>
 #include <fstream>
 #include <iomanip>
+#include <chrono>
 #include <gmapping/utils/stat.h>
 #include "gmapping/gridfastslam/gridslamprocessor.h"
 
 //#define MAP_CONSISTENCY_CHECK
 //#define GENERATE_TRAJECTORIES
+
+// Timing debug flag
+extern bool g_timing_debug __attribute__((weak));
+
+// Simple timer helper
+static double timer_elapsed_ms(std::chrono::high_resolution_clock::time_point start) {
+    auto now = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now - start).count() / 1000.0;
+}
 
 namespace GMapping {
 
@@ -18,11 +28,12 @@ const double m_distanceThresholdCheck = 20;
 using namespace std;
 
   GridSlamProcessor::GridSlamProcessor(): m_infoStream(cout){
-    
+
     period_ = 5.0;
     m_obsSigmaGain=1;
     m_resampleThreshold=0.5;
     m_minimumScore=0.;
+    m_singleMapMode=false;  // Default: use per-particle maps (original behavior)
   }
   
   GridSlamProcessor::GridSlamProcessor(const GridSlamProcessor& gsp) 
@@ -69,7 +80,8 @@ using namespace std;
     m_linearThresholdDistance=gsp.m_linearThresholdDistance;
     m_angularThresholdDistance=gsp.m_angularThresholdDistance;
     m_obsSigmaGain=gsp.m_obsSigmaGain;
-    
+    m_singleMapMode=gsp.m_singleMapMode;
+
 #ifdef MAP_CONSISTENCY_CHECK
     cerr << __func__ <<  ": trajectories copy.... ";
 #endif
@@ -416,7 +428,10 @@ void GridSlamProcessor::setMotionModelParameters
                                reading.getTime());
 
       if (m_count>0){
+	// Timing for scanMatch
+	auto t_scanmatch_start = std::chrono::high_resolution_clock::now();
 	scanMatch(plainReading);
+	double t_scanmatch = timer_elapsed_ms(t_scanmatch_start);
 	if (m_outputStream.is_open()){
 	  m_outputStream << "LASER_READING "<< reading.size() << " ";
 	  m_outputStream << setiosflags(ios::fixed) << setprecision(2);
@@ -435,8 +450,11 @@ void GridSlamProcessor::setMotionModelParameters
 	  m_outputStream << endl;
 	}
 	onScanmatchUpdate();
-	
+
+	// Timing for updateTreeWeights
+	auto t_weights_start = std::chrono::high_resolution_clock::now();
 	updateTreeWeights(false);
+	double t_weights = timer_elapsed_ms(t_weights_start);
 				
 	if (m_infoStream){
 	  m_infoStream << "neff= " << m_neff  << endl;
@@ -445,8 +463,16 @@ void GridSlamProcessor::setMotionModelParameters
 	  m_outputStream << setiosflags(ios::fixed) << setprecision(6);
 	  m_outputStream << "NEFF " << m_neff << endl;
 	}
+
+	// Timing for resample
+	auto t_resample_start = std::chrono::high_resolution_clock::now();
  	resample(plainReading, adaptParticles, reading_copy);
-	
+	double t_resample = timer_elapsed_ms(t_resample_start);
+
+	// Print timing breakdown (always print for debugging)
+	cerr << "[SLAM Detail] scanMatch: " << t_scanmatch << "ms, updateWeights: "
+	     << t_weights << "ms, resample: " << t_resample << "ms" << endl;
+
       } else {
 	m_infoStream << "Registering First Scan"<< endl;
 	for (ParticleVector::iterator it=m_particles.begin(); it!=m_particles.end(); it++){	

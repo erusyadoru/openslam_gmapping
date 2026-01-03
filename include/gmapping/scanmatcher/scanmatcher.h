@@ -8,7 +8,7 @@
 #include <iostream>
 #include <gmapping/utils/gvalues.h>
 #include <gmapping/scanmatcher/scanmatcher_export.h>
-#define LASER_MAXBEAMS 2048
+#define LASER_MAXBEAMS 4096
 
 namespace GMapping {
 
@@ -23,12 +23,19 @@ class SCANMATCHER_EXPORT ScanMatcher{
 		double optimize(OrientedPoint& mean, CovarianceMatrix& cov, const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const;
 		
 		double   registerScan(ScanMatcherMap& map, const OrientedPoint& p, const double* readings);
+		// Register scan using a pre-computed activeArea (for optimization - avoids recomputing ray tracing)
+		double   registerScanWithActiveArea(ScanMatcherMap& map, const OrientedPoint& p, const double* readings,
+		                                     const HierarchicalArray2D<PointAccumulator>::PointSet& activeArea);
 		void setLaserParameters
 			(unsigned int beams, double* angles, const OrientedPoint& lpose);
 		void setMatchingParameters
 			(double urange, double range, double sigma, int kernsize, double lopt, double aopt, int iterations, double likelihoodSigma=1, unsigned int likelihoodSkip=0 );
 		void invalidateActiveArea();
 		void computeActiveArea(ScanMatcherMap& map, const OrientedPoint& p, const double* readings);
+		// Get the last computed activeArea from a map's storage
+		static const HierarchicalArray2D<PointAccumulator>::PointSet& getActiveArea(const ScanMatcherMap& map) {
+			return map.storage().getActiveArea();
+		}
 
 		inline double icpStep(OrientedPoint & pret, const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const;
 		inline double score(const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const;
@@ -46,6 +53,8 @@ class SCANMATCHER_EXPORT ScanMatcher{
 		/**laser parameters*/
 		unsigned int m_laserBeams;
 		double       m_laserAngles[LASER_MAXBEAMS];
+		double       m_laserSin[LASER_MAXBEAMS];  // Pre-computed sin(angle) for each beam
+		double       m_laserCos[LASER_MAXBEAMS];  // Pre-computed cos(angle) for each beam
 		//OrientedPoint m_laserPose;
 		PARAM_SET_GET(OrientedPoint, laserPose, protected, public, public)
 		PARAM_SET_GET(double, laserMaxRange, protected, public, public)
@@ -75,27 +84,37 @@ class SCANMATCHER_EXPORT ScanMatcher{
 };
 
 inline double ScanMatcher::icpStep(OrientedPoint & pret, const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const{
-	const double * angle=m_laserAngles+m_initialBeamsSkip;
 	OrientedPoint lp=p;
 	lp.x+=cos(p.theta)*m_laserPose.x-sin(p.theta)*m_laserPose.y;
 	lp.y+=sin(p.theta)*m_laserPose.x+cos(p.theta)*m_laserPose.y;
 	lp.theta+=m_laserPose.theta;
+
+	// Pre-compute sin/cos of robot orientation (optimization)
+	const double cos_theta = cos(lp.theta);
+	const double sin_theta = sin(lp.theta);
+
 	unsigned int skip=0;
 	double freeDelta=map.getDelta()*m_freeCellRatio;
 	std::list<PointPair> pairs;
-	
-	for (const double* r=readings+m_initialBeamsSkip; r<readings+m_laserBeams; r++, angle++){
+
+	for (unsigned int i = m_initialBeamsSkip; i < m_laserBeams; i++){
+		const double r = readings[i];
 		skip++;
 		skip=skip>m_likelihoodSkip?0:skip;
-		if (*r>m_usableRange||*r==0.0) continue;
+		if (r>m_usableRange||r==0.0) continue;
 		if (skip) continue;
+
+		// Use angle addition formula: cos(A+B) = cosA*cosB - sinA*sinB
+		const double cos_total = cos_theta * m_laserCos[i] - sin_theta * m_laserSin[i];
+		const double sin_total = sin_theta * m_laserCos[i] + cos_theta * m_laserSin[i];
+
 		Point phit=lp;
-		phit.x+=*r*cos(lp.theta+*angle);
-		phit.y+=*r*sin(lp.theta+*angle);
+		phit.x+=r*cos_total;
+		phit.y+=r*sin_total;
 		IntPoint iphit=map.world2map(phit);
 		Point pfree=lp;
-		pfree.x+=(*r-map.getDelta()*freeDelta)*cos(lp.theta+*angle);
-		pfree.y+=(*r-map.getDelta()*freeDelta)*sin(lp.theta+*angle);
+		pfree.x+=(r-map.getDelta()*freeDelta)*cos_total;
+		pfree.y+=(r-map.getDelta()*freeDelta)*sin_total;
  		pfree=pfree-phit;
 		IntPoint ipfree=map.world2map(pfree);
 		bool found=false;
@@ -119,8 +138,8 @@ inline double ScanMatcher::icpStep(OrientedPoint & pret, const ScanMatcherMap& m
 						if((mu*mu)<(bestMu*bestMu)){
 							bestMu=mu;
 							bestCell=cell.mean();
-						} 
-						
+						}
+
 				}
 			//}
 		}
@@ -130,7 +149,7 @@ inline double ScanMatcher::icpStep(OrientedPoint & pret, const ScanMatcherMap& m
 		}
 		//std::cerr << std::endl;
 	}
-	
+
 	OrientedPoint result(0,0,0);
 	//double icpError=icpNonlinearStep(result,pairs);
 	std::cerr << "result(" << pairs.size() << ")=" << result.x << " " << result.y << " " << result.theta << std::endl;
@@ -143,24 +162,34 @@ inline double ScanMatcher::icpStep(OrientedPoint & pret, const ScanMatcherMap& m
 
 inline double ScanMatcher::score(const ScanMatcherMap& map, const OrientedPoint& p, const double* readings) const{
 	double s=0;
-	const double * angle=m_laserAngles+m_initialBeamsSkip;
 	OrientedPoint lp=p;
 	lp.x+=cos(p.theta)*m_laserPose.x-sin(p.theta)*m_laserPose.y;
 	lp.y+=sin(p.theta)*m_laserPose.x+cos(p.theta)*m_laserPose.y;
 	lp.theta+=m_laserPose.theta;
+
+	// Pre-compute sin/cos of robot orientation (optimization)
+	const double cos_theta = cos(lp.theta);
+	const double sin_theta = sin(lp.theta);
+
 	unsigned int skip=0;
 	double freeDelta=map.getDelta()*m_freeCellRatio;
-	for (const double* r=readings+m_initialBeamsSkip; r<readings+m_laserBeams; r++, angle++){
+	for (unsigned int i = m_initialBeamsSkip; i < m_laserBeams; i++){
+		const double r = readings[i];
 		skip++;
 		skip=skip>m_likelihoodSkip?0:skip;
-		if (skip||*r>m_usableRange||*r==0.0) continue;
+		if (skip||r>m_usableRange||r==0.0) continue;
+
+		// Use angle addition formula: cos(A+B) = cosA*cosB - sinA*sinB
+		const double cos_total = cos_theta * m_laserCos[i] - sin_theta * m_laserSin[i];
+		const double sin_total = sin_theta * m_laserCos[i] + cos_theta * m_laserSin[i];
+
 		Point phit=lp;
-		phit.x+=*r*cos(lp.theta+*angle);
-		phit.y+=*r*sin(lp.theta+*angle);
+		phit.x+=r*cos_total;
+		phit.y+=r*sin_total;
 		IntPoint iphit=map.world2map(phit);
 		Point pfree=lp;
-		pfree.x+=(*r-map.getDelta()*freeDelta)*cos(lp.theta+*angle);
-		pfree.y+=(*r-map.getDelta()*freeDelta)*sin(lp.theta+*angle);
+		pfree.x+=(r-map.getDelta()*freeDelta)*cos_total;
+		pfree.y+=(r-map.getDelta()*freeDelta)*sin_total;
  		pfree=pfree-phit;
 		IntPoint ipfree=map.world2map(pfree);
 		bool found=false;
@@ -193,27 +222,37 @@ inline unsigned int ScanMatcher::likelihoodAndScore(double& s, double& l, const 
 	using namespace std;
 	l=0;
 	s=0;
-	const double * angle=m_laserAngles+m_initialBeamsSkip;
 	OrientedPoint lp=p;
 	lp.x+=cos(p.theta)*m_laserPose.x-sin(p.theta)*m_laserPose.y;
 	lp.y+=sin(p.theta)*m_laserPose.x+cos(p.theta)*m_laserPose.y;
 	lp.theta+=m_laserPose.theta;
+
+	// Pre-compute sin/cos of robot orientation (optimization)
+	const double cos_theta = cos(lp.theta);
+	const double sin_theta = sin(lp.theta);
+
 	double noHit=nullLikelihood/(m_likelihoodSigma);
 	unsigned int skip=0;
 	unsigned int c=0;
 	double freeDelta=map.getDelta()*m_freeCellRatio;
-	for (const double* r=readings+m_initialBeamsSkip; r<readings+m_laserBeams; r++, angle++){
+	for (unsigned int i = m_initialBeamsSkip; i < m_laserBeams; i++){
+		const double r = readings[i];
 		skip++;
 		skip=skip>m_likelihoodSkip?0:skip;
-		if (*r>m_usableRange) continue;
+		if (r>m_usableRange) continue;
 		if (skip) continue;
+
+		// Use angle addition formula: cos(A+B) = cosA*cosB - sinA*sinB
+		const double cos_total = cos_theta * m_laserCos[i] - sin_theta * m_laserSin[i];
+		const double sin_total = sin_theta * m_laserCos[i] + cos_theta * m_laserSin[i];
+
 		Point phit=lp;
-		phit.x+=*r*cos(lp.theta+*angle);
-		phit.y+=*r*sin(lp.theta+*angle);
+		phit.x+=r*cos_total;
+		phit.y+=r*sin_total;
 		IntPoint iphit=map.world2map(phit);
 		Point pfree=lp;
-		pfree.x+=(*r-freeDelta)*cos(lp.theta+*angle);
-		pfree.y+=(*r-freeDelta)*sin(lp.theta+*angle);
+		pfree.x+=(r-freeDelta)*cos_total;
+		pfree.y+=(r-freeDelta)*sin_total;
 		pfree=pfree-phit;
 		IntPoint ipfree=map.world2map(pfree);
 		bool found=false;
@@ -234,7 +273,7 @@ inline unsigned int ScanMatcher::likelihoodAndScore(double& s, double& l, const 
 					}else
 						bestMu=(mu*mu)<(bestMu*bestMu)?mu:bestMu;
 				}
-			//}	
+			//}
 		}
 		if (found){
 			s+=exp(-1./m_gaussianSigma*bestMu*bestMu);

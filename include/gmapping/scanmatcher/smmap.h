@@ -9,32 +9,35 @@ namespace GMapping {
 
 struct PointAccumulator{
 	typedef point<float> FloatPoint;
-	/* before 
+	/* before
 	PointAccumulator(int i=-1): acc(0,0), n(0), visits(0){assert(i==-1);}
 	*/
 	/*after begin*/
-	PointAccumulator(): acc(0,0), n(0), visits(0){}
-	PointAccumulator(int i): acc(0,0), n(0), visits(0){assert(i==-1);}
+	PointAccumulator(): acc(0,0), n(0), visits(0), max_occ(0){}
+	PointAccumulator(int i): acc(0,0), n(0), visits(0), max_occ(0){assert(i==-1);}
 	/*after end*/
         inline void update(bool value, const Point& p=Point(0,0));
 	inline Point mean() const {return 1./n*Point(acc.x, acc.y);}
 	inline operator double() const { return visits?(double)n*SIGHT_INC/(double)visits:-1; }
-	inline void add(const PointAccumulator& p) {acc=acc+p.acc; n+=p.n; visits+=p.visits; }
+	inline double maxOcc() const { return visits ? max_occ : -1; }
+	inline void add(const PointAccumulator& p) {acc=acc+p.acc; n+=p.n; visits+=p.visits; if(p.max_occ>max_occ) max_occ=p.max_occ; }
 	static const PointAccumulator& Unknown();
 	static PointAccumulator* unknown_ptr;
 	FloatPoint acc;
 	int n, visits;
+	float max_occ;
 	inline double entropy() const;
 };
 
 void PointAccumulator::update(bool value, const Point& p){
 	if (value) {
 		acc.x+= static_cast<float>(p.x);
-		acc.y+= static_cast<float>(p.y); 
-		n++; 
+		acc.y+= static_cast<float>(p.y);
+		n++;
 		visits+=SIGHT_INC;
 	} else
 		visits++;
+	// max_occ tracking disabled for speed test
 }
 
 double PointAccumulator::entropy() const{

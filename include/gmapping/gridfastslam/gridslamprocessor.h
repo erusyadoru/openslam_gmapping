@@ -299,7 +299,11 @@ namespace GMapping {
     
     //smoothing factor for the likelihood
     PARAM_SET_GET(double, obsSigmaGain, protected, public, public);
-	
+
+    // Single-map mode: use only one shared map instead of per-particle maps
+    // This significantly reduces memory and computation but trades off multi-hypothesis tracking
+    PARAM_SET_GET(bool, singleMapMode, protected, public, public);
+
     //stream in which to write the gfs file
     std::ofstream m_outputStream;
 
