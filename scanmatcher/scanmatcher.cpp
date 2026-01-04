@@ -626,6 +626,9 @@ void ScanMatcher::setLaserParameters
 	for (unsigned int i = 0; i < beams; i++) {
 		m_laserSin[i] = sin(angles[i]);
 		m_laserCos[i] = cos(angles[i]);
+		// Float versions for NEON SIMD
+		m_laserSinF[i] = static_cast<float>(m_laserSin[i]);
+		m_laserCosF[i] = static_cast<float>(m_laserCos[i]);
 	}
 }
 	
